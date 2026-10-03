@@ -1,0 +1,32 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# 本地私有产物
+*.part
+*.part.json
+health.json
+capabilities.local.json
+
+# 凭据：绝不入库
+.env
+*.token
+*.key
+*.pem
+credentials.json
+token.txt
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 下载缓存
+_downloads/
+tmp/

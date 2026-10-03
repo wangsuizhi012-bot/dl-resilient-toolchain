@@ -1,0 +1,375 @@
+{
+  "name": "dl",
+  "version": "1.1.0",
+  "schema_version": "1.0.0",
+  "description": "Resilient download toolchain: mirror probing, failover, resume, progress, and proxy budget control",
+  "entrypoints": {
+    "cli": "python dl.py <tool> [params]",
+    "api": "from dlm.api import run; run('dl.hf', repo=..., dest=...)"
+  },
+  "invariants": [
+    "CLI and API share this single execution path, so behaviour and error codes cannot diverge.",
+    "Every response is the same envelope; no call raises.",
+    "Routing is decided before any bytes move and is reportable via dl.route.",
+    "Default route is direct; proxy is an explicit manual switch (project rule 13)."
+  ],
+  "tools": [
+    {
+      "id": "dl.caps",
+      "version": "1.0.0",
+      "status": "stable",
+      "since": "1.1.0",
+      "summary": "Return the machine-readable capability manifest",
+      "params": {},
+      "returns": "manifest{name,version,schema_version,tools[],error_codes{}}",
+      "examples": [
+        {
+          "cli": "dl caps --json",
+          "api": "run(\"dl.caps\")"
+        }
+      ],
+      "errors": [],
+      "network": "no"
+    },
+    {
+      "id": "dl.health",
+      "version": "1.0.0",
+      "status": "stable",
+      "since": "1.1.0",
+      "summary": "Return cached mirror health without re-probing",
+      "params": {
+        "max_age_s": {
+          "type": "int",
+          "default": 600,
+          "cli": "--max-age",
+          "desc": "ignore cache entries older than this many seconds"
+        }
+      },
+      "returns": "mirrors[{name,ok,latency_ms,age_s,detail}], cache_path, ttl_s",
+      "examples": [
+        {
+          "cli": "dl health --max-age 60",
+          "api": "run(\"dl.health\", max_age_s=60)"
+        }
+      ],
+      "errors": [],
+      "network": "no"
+    },
+    {
+      "id": "dl.hf",
+      "version": "1.1.0",
+      "status": "stable",
+      "since": "1.0.0",
+      "summary": "Snapshot a Hugging Face repo, direct by default so proxy quota is not spent on blobs",
+      "params": {
+        "repo": {
+          "type": "str",
+          "required": true,
+          "cli": "positional",
+          "desc": "Hugging Face repo id, e.g. Qwen/Qwen2-0.5B"
+        },
+        "dest": {
+          "type": "str",
+          "required": true,
+          "cli": "-d/--dest",
+          "desc": "local directory to write the snapshot into (created if absent), e.g. E:/AI/LLM/GGUF/Qwen2-0.5B"
+        },
+        "allow": {
+          "type": "list[str]",
+          "default": [],
+          "cli": "--allow",
+          "desc": "repeatable glob, e.g. '*.safetensors'"
+        },
+        "proxy": {
+          "type": "bool",
+          "default": false,
+          "cli": "-p",
+          "desc": "use huggingface.co via 127.0.0.1:65532"
+        },
+        "proxy_budget": {
+          "type": "int",
+          "default": 0,
+          "cli": "--proxy-budget",
+          "desc": "cap proxy bytes, e.g. 512MB"
+        },
+        "token": {
+          "type": "str",
+          "default": "",
+          "cli": "--token",
+          "desc": "HF token for gated repos"
+        }
+      },
+      "returns": "path, files[], route{flow,reason}",
+      "examples": [
+        {
+          "cli": "dl hf Qwen/Qwen2-0.5B -d E:/models/qwen --allow \"*.safetensors\"",
+          "api": "run(\"dl.hf\", repo=\"Qwen/Qwen2-0.5B\", dest=\"E:/models/qwen\", allow=[\"*.safetensors\"])"
+        },
+        {
+          "cli": "dl hf some-org/private-model -d E:/models/p -p --token $HF_TOKEN",
+          "api": "run(\"dl.hf\", repo=\"some-org/private-model\", dest=\"E:/models/p\", proxy=True, token=os.environ[\"HF_TOKEN\"])"
+        }
+      ],
+      "errors": [
+        "E_AUTH_REQUIRED",
+        "E_PROXY_UNREACHABLE",
+        "E_TLS_BLOCKED",
+        "E_TIMEOUT",
+        "E_NOT_FOUND"
+      ],
+      "network": "yes"
+    },
+    {
+      "id": "dl.probe",
+      "version": "1.1.0",
+      "status": "stable",
+      "since": "1.0.0",
+      "summary": "Check mirror health and rank by measured latency. Probes DIRECT by default; --proxy changes the question being asked",
+      "params": {
+        "fresh": {
+          "type": "bool",
+          "default": false,
+          "cli": "--fresh",
+          "desc": "ignore the 10-minute health cache"
+        },
+        "pypi_only": {
+          "type": "bool",
+          "default": false,
+          "cli": "--pypi-only",
+          "desc": "skip HF probes"
+        },
+        "proxy": {
+          "type": "bool",
+          "default": false,
+          "cli": "--proxy",
+          "desc": "probe THROUGH the proxy instead of direct. Use only to answer 'is it reachable via proxy'; results do not reflect direct reachability"
+        }
+      },
+      "returns": "mirrors[{kind,name,ok,latency_ms,detail}], summary{healthy,total,fastest[]}, probe_mode",
+      "examples": [
+        {
+          "cli": "dl probe --fresh",
+          "api": "run(\"dl.probe\", fresh=True)"
+        },
+        {
+          "cli": "dl probe --proxy --fresh",
+          "api": "run(\"dl.probe\", proxy=True, fresh=True)"
+        }
+      ],
+      "errors": [
+        "E_NO_HEALTHY_SOURCE"
+      ],
+      "network": "yes (read-only probes)"
+    },
+    {
+      "id": "dl.pypi",
+      "version": "1.0.0",
+      "status": "stable",
+      "since": "1.0.0",
+      "summary": "Download one PyPI distribution file with mirror failover",
+      "params": {
+        "pkg": {
+          "type": "str",
+          "required": true,
+          "cli": "positional",
+          "desc": "PyPI project name, e.g. six"
+        },
+        "file": {
+          "type": "str",
+          "required": true,
+          "cli": "positional",
+          "desc": "exact distribution filename including extension, e.g. six-1.16.0.tar.gz"
+        },
+        "dest": {
+          "type": "str",
+          "required": true,
+          "cli": "-d/--dest",
+          "desc": "output directory (created if absent), e.g. D:/tmp/wheels"
+        },
+        "retries": {
+          "type": "int",
+          "default": 4,
+          "cli": "--retries",
+          "desc": "attempts per mirror before switching"
+        },
+        "quiet": {
+          "type": "bool",
+          "default": false,
+          "cli": "-q/--quiet",
+          "desc": "suppress the progress line"
+        }
+      },
+      "returns": "path, size, size_human, mirror, resumed_from",
+      "examples": [
+        {
+          "cli": "dl pypi six six-1.16.0.tar.gz -d D:/tmp",
+          "api": "run(\"dl.pypi\", pkg=\"six\", file=\"six-1.16.0.tar.gz\", dest=\"D:/tmp\")"
+        }
+      ],
+      "errors": [
+        "E_NOT_FOUND",
+        "E_NO_HEALTHY_SOURCE",
+        "E_INTEGRITY",
+        "E_TIMEOUT"
+      ],
+      "network": "yes"
+    },
+    {
+      "id": "dl.route",
+      "version": "1.0.0",
+      "status": "stable",
+      "since": "1.1.0",
+      "summary": "Explain which flow a target should take, without downloading anything",
+      "params": {
+        "target": {
+          "type": "str",
+          "required": true,
+          "cli": "positional",
+          "desc": "a pypi package name, a HF repo id (org/name), or any http(s) URL"
+        },
+        "proxy": {
+          "type": "bool",
+          "default": false,
+          "cli": "-p",
+          "desc": "assume the proxy is available (still falls back to direct if the port is dead)"
+        }
+      },
+      "returns": "route{flow,endpoint,use_proxy,reason,warnings[],candidates[]}",
+      "examples": [
+        {
+          "cli": "dl route Qwen/Qwen2-0.5B",
+          "api": "run(\"dl.route\", target=\"Qwen/Qwen2-0.5B\")"
+        }
+      ],
+      "errors": [
+        "E_USAGE"
+      ],
+      "network": "no (local decision; does one liveness probe)"
+    },
+    {
+      "id": "dl.url",
+      "version": "1.0.0",
+      "status": "stable",
+      "since": "1.0.0",
+      "summary": "Download an arbitrary URL with resume and failover",
+      "params": {
+        "url": {
+          "type": "str",
+          "required": true,
+          "cli": "positional",
+          "desc": "absolute http(s) URL to fetch"
+        },
+        "output": {
+          "type": "str",
+          "required": true,
+          "cli": "-o/--output",
+          "desc": "destination file path (parent dirs created)"
+        },
+        "mirror": {
+          "type": "str",
+          "default": "",
+          "cli": "--mirror",
+          "desc": "fallback URL for the same object, used when the primary fails"
+        },
+        "retries": {
+          "type": "int",
+          "default": 4,
+          "cli": "--retries",
+          "desc": "attempts per URL before giving up"
+        },
+        "quiet": {
+          "type": "bool",
+          "default": false,
+          "cli": "-q/--quiet",
+          "desc": "suppress the progress line"
+        }
+      },
+      "returns": "path, size, size_human, mirror, resumed_from",
+      "examples": [
+        {
+          "cli": "dl url https://example.com/f.bin -o D:/tmp/f.bin",
+          "api": "run(\"dl.url\", url=\"https://example.com/f.bin\", output=\"D:/tmp/f.bin\")"
+        }
+      ],
+      "errors": [
+        "E_TIMEOUT",
+        "E_INTEGRITY",
+        "E_TLS_BLOCKED",
+        "E_NOT_FOUND"
+      ],
+      "network": "yes"
+    }
+  ],
+  "error_codes": {
+    "E_AUTH_REQUIRED": {
+      "exit": 13,
+      "retryable": false,
+      "meaning": "needs an HF token; supply --token"
+    },
+    "E_BUDGET_EXCEEDED": {
+      "exit": 14,
+      "retryable": false,
+      "meaning": "proxy budget would be exceeded"
+    },
+    "E_DEPRECATED": {
+      "exit": 19,
+      "retryable": false,
+      "meaning": "tool is deprecated; see removed_in/replaced_by"
+    },
+    "E_INTEGRITY": {
+      "exit": 16,
+      "retryable": true,
+      "meaning": "checksum mismatch; corrupt transfer"
+    },
+    "E_INTERNAL": {
+      "exit": 20,
+      "retryable": false,
+      "meaning": "unexpected error"
+    },
+    "E_NOT_FOUND": {
+      "exit": 12,
+      "retryable": false,
+      "meaning": "object does not exist on any source"
+    },
+    "E_NO_HEALTHY_SOURCE": {
+      "exit": 11,
+      "retryable": true,
+      "meaning": "every candidate mirror failed; retry later"
+    },
+    "E_OK": {
+      "exit": 0,
+      "retryable": false,
+      "meaning": "success"
+    },
+    "E_PARTIAL": {
+      "exit": 18,
+      "retryable": true,
+      "meaning": "batch finished with some items failed"
+    },
+    "E_PROXY_UNREACHABLE": {
+      "exit": 15,
+      "retryable": true,
+      "meaning": "proxy port not listening"
+    },
+    "E_TIMEOUT": {
+      "exit": 17,
+      "retryable": true,
+      "meaning": "no data within the timeout window"
+    },
+    "E_TLS_BLOCKED": {
+      "exit": 15,
+      "retryable": true,
+      "meaning": "TLS verify failed; route is intercepted"
+    },
+    "E_UNSUPPORTED": {
+      "exit": 19,
+      "retryable": false,
+      "meaning": "unknown tool id or removed capability"
+    },
+    "E_USAGE": {
+      "exit": 10,
+      "retryable": false,
+      "meaning": "bad arguments or missing required field"
+    }
+  }
+}
