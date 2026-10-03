@@ -237,7 +237,57 @@ Host github.com
 
 ---
 
+## 坑 5：`git push` 默认推 `main`，但本地是 `master`
+
+### 报错
+
+```
+error: src refspec main does not match any
+error: failed to push some refs to '...'
+```
+
+### 根本原因
+
+`git init` 在本机默认创建 **`master`** 分支（除非有全局
+`init.defaultBranch` 配置），而 GitHub 的默认分支是 **`main`**。
+直接 `git push -u origin main` 会因为**本地根本没有 `main` 这个 ref** 而失败。
+
+### 排查思路（1 秒）
+
+```bash
+git branch --show-current     # 看清本地到底叫什么
+```
+
+> 报错里的 `src refspec main does not match any` 措辞已经提示了：
+> **源（src）** 引用 `main` **匹配不到任何东西** —— 是本地没有这个分支。
+
+### 解决方法
+
+两种都行：
+
+```bash
+# 方案 A：推送时改名（不影响本地历史）
+git push -u origin master:main
+
+# 方案 B：先把本地分支改名成 main（更干净，以后 push 不用带参数）
+git branch -M main
+git push -u origin main
+```
+
+> 本项目最终用方案 A 推送（远程分支 `main`），本地保留 `master`。
+> 若希望本地也叫 `main`，执行方案 B 即可。
+
+---
+
 ## 📌 如何避免复发
+
+### 0. 新仓库第一件事：`git init` 后立刻确认分支名
+
+```bash
+git init && git branch --show-current
+# 想要 main 就立刻改名，避免每次 push 都要带 refspec
+git branch -M main
+```
 
 ### 1. 把代理从「硬编码」改成「跟随环境变量」
 
@@ -308,24 +358,60 @@ git -c http.proxy= -c https.proxy= ls-remote <url>   # 能列出来 = 网络没�
 | `403 Resource not accessible by integration` | MCP 令牌无建仓权 | 改用 `gh repo create` |
 | `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | schannel 吊销检查 | 先修代理；git 用 OpenSSL 不受影响 |
 | `port 22: Connection refused` | SSH 22 端口被封 | `Hostname ssh.github.com` + `Port 443` |
+| `src refspec main does not match any` | 本地是 `master` | `git push -u origin master:main` 或 `git branch -M main` |
 | `netstat` 查不到代理端口 | 代理没开 | 开代理，或用直连方案 |
 
 ---
 
-## 最终生效的推送方式
+## 最终生效的推送方式（已实测跑通，可直接复制）
 
 ```bash
-# 1) 建仓（用 gh，本地 OAuth 令牌有权限）
-gh repo create wangsuizhi012-bot/dl-resilient-toolchain --public --description "..."
+# 1) 建仓（用 gh：本地 OAuth 令牌有建仓权，MCP 连接器没有）
+gh repo create wangsuizhi012-bot/dl-resilient-toolchain \
+  --public --description "Resilient download toolchain..."
 
-# 2) 提交并推送（显式绕过 .gitconfig 里的死代理）
+# 2) 提交（用 -c 只对本次生效，不污染全局配置）
 cd E:/AI/_scripts/dl
 git init
 git add .
 git -c user.name="wangsuizhi012-bot" \
     -c user.email="295518665+wangsuizhi012-bot@users.noreply.github.com" \
+    -c commit.gpgsign=false \
     commit -m "feat: resilient download toolchain v1.1.0"
-git -c http.proxy= -c https.proxy= push -u origin main
+
+# 3) 推送（-c http.proxy= 绕过硬编码死代理；master:main 处理分支名差异）
+git remote add origin https://github.com/wangsuizhi012-bot/dl-resilient-toolchain.git
+git -c http.proxy= -c https.proxy= push -u origin master:main
 ```
 
-**注意**：第 3 步用 `-c user.*` 只对这次提交生效，不污染全局配置。
+**两条 `-c http.proxy= -c https.proxy=` 是本机 push 成功的关键**，
+它让本次 push 不走 `~/.gitconfig` 里那个指向 65532 的死代理。
+
+### 一次性根治（可选，会改动你的全局配置）
+
+```bash
+git config --global --unset http.proxy
+git config --global --unset https.proxy
+```
+
+移除后 git 自动回退到读环境变量，此后代理开关无需再动 git 配置。
+**前提**：你不再需要「git 固定走某个代理」。
+
+---
+
+## ✅ 实测结果（2026-10-03）
+
+```
+$ git -c http.proxy= -c https.proxy= push -u origin master:main
+To https://github.com/wangsuizhi012-bot/dl-resilient-toolchain.git
+ * [new branch]      master -> main
+branch 'master' set up to track 'origin/main'.
+
+$ git ls-remote origin
+5a5e8dc9ba84eae2abc55e82919aecf43cb8dc08	HEAD
+5a5e8dc9ba84eae2abc55e82919aecf43cb8dc08	refs/heads/main
+```
+
+仓库：<https://github.com/wangsuizhi012-bot/dl-resilient-toolchain>
+19 个文件 / 3874 行，全部推送成功。
+
