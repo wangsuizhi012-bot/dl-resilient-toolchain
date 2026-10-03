@@ -239,55 +239,145 @@ Host github.com
 
 ## 坑 5：`git push` 默认推 `main`，但本地是 `master`
 
-### 报错
+### 失败时的**具体报错**
 
+**情况 A —— 首次推送时**：
 ```
 error: src refspec main does not match any
 error: failed to push some refs to '...'
 ```
 
+**情况 B —— 已建立上游后，仍不能裸 push**：
+```
+fatal: The upstream branch of your current branch does not match
+the name of your current branch.  To push to the upstream branch
+on the remote, use
+
+    git push origin HEAD:main
+```
+
 ### 根本原因
 
-`git init` 在本机默认创建 **`master`** 分支（除非有全局
-`init.defaultBranch` 配置），而 GitHub 的默认分支是 **`main`**。
-直接 `git push -u origin main` 会因为**本地根本没有 `main` 这个 ref** 而失败。
+`git init` 在本机默认创建 **`master`** 分支（当时全局
+`init.defaultBranch` **未设置**），而 GitHub 的默认分支是 **`main`**。
 
-### 排查思路（1 秒）
+**情况 B 最容易被误判**：明明已经 `push -u` 建立了追踪关系，
+看起来"配好了"，但因为**本地名和远程名不同**，git 每次裸 `git push`
+都会报这个错。**这不是没配上游，是名字不一致。**
 
-```bash
-git branch --show-current     # 看清本地到底叫什么
-```
-
-> 报错里的 `src refspec main does not match any` 措辞已经提示了：
-> **源（src）** 引用 `main` **匹配不到任何东西** —— 是本地没有这个分支。
-
-### 解决方法
-
-两种都行：
+### 排查思路
 
 ```bash
-# 方案 A：推送时改名（不影响本地历史）
-git push -u origin master:main
-
-# 方案 B：先把本地分支改名成 main（更干净，以后 push 不用带参数）
-git branch -M main
-git push -u origin main
+git branch --show-current            # 本地叫什么
+git ls-remote --heads origin        # 远程叫什么
+# 两行名字不一样 -> 就是本坑
 ```
 
-> 本项目最终用方案 A 推送（远程分支 `main`），本地保留 `master`。
-> 若希望本地也叫 `main`，执行方案 B 即可。
+### 最终解决方法（本项目已采用）
+
+```bash
+git branch -M main        # 本地改名，-M = 强制移动
+git push -u origin main   # 之后裸 push 即可
+```
+
+改完实测：
+```
+$ git push
+To https://github.com/wangsuizhi012-bot/dl-resilient-toolchain.git
+   dc0ff33..xxxxxxx  main -> main          ✅ 不再需要任何 refspec
+```
+
+**同时已把全局默认值改掉，以后新建仓库不会再撞这个坑**：
+
+```bash
+git config --global init.defaultBranch main
+```
+
+实测新建仓库后 `git branch --show-current` 直接就是 `main`。
+
+> ⚠️ 注意：`git branch -M` **只改本地**，远程分支名是 push 时决定的。
+> 若已推过 `master`，改完还要推一次 `main` 上去并删掉旧的 `master`。
+
+### 预防
+
+```bash
+# 以后新仓库：init 之后立刻改，两秒完成
+git init && git branch -M main
+```
 
 ---
 
-## 📌 如何避免复发
+## 坑 6：误把测试提交推到远程（自造分叉）
 
-### 0. 新仓库第一件事：`git init` 后立刻确认分支名
+### 现象
+
+```
+To https://github.com/... 
+ ! [rejected]        main -> main (non-fast-forward)
+error: failed to push some refs to '...'
+```
+
+### 根本原因（自己挖的坑）
+
+为验证「改名后能否裸 push」，我做了两次**真实提交并推送**来测试。
+其中一次 `test: bare push after rename` 已被推到远程。
+之后用 `git reset --hard HEAD~1` 只回滚了**本地**——
+**远程那个提交还在**，于是本地与远程分叉，后续 push 被拒。
+
+> **核心教训**：`git reset` 只动本地。**已经 push 过的提交，
+> 本地回滚不会同步远程**，必须再推一次（或 `force-with-lease`）才能覆盖。
+
+### 排查思路
 
 ```bash
-git init && git branch --show-current
-# 想要 main 就立刻改名，避免每次 push 都要带 refspec
-git branch -M main
+git log --oneline -3              # 本地在哪
+git log --oneline origin/main -3  # 远程在哪  <- 需要先 fetch
+git ls-remote origin              # 直接看远程真实 commit
 ```
+
+对比出现两条不同的 head commit = 分叉。
+
+### 解决方法
+
+```bash
+# 用 --force-with-lease（比 --force 安全：远程有别人的新提交时会拒绝）
+git push --force-with-lease origin main
+```
+
+> ⚠️ **不要用裸 `--force`**：它会无条件覆盖，可能抹掉协作者的提交。
+> `--force-with-lease` 会在远程有未知变更时拒绝执行。
+
+实测结果：
+```
+ + 63146d8...dc0ff33 main -> main (forced update)   ✅ 垃圾提交已清除
+```
+
+### 预防
+
+**不要用真实 push 来做测试。** 验证推送链路有零风险的替代法：
+
+```bash
+git -c http.proxy= -c https.proxy= ls-remote <url>   # 只读，不改远程
+```
+
+或者在**临时仓库**测（`/tmp/xxx`），别在真实仓库上试。
+
+
+## 📌 如何避免复发
+
+### 0. 分支名：已一次性根治，**以后不用再管**
+
+本项目已执行：
+
+```bash
+git branch -M main                                              # 本地改名
+git config --global init.defaultBranch main                     # 全局默认
+```
+
+实测新建仓库 `git branch --show-current` 直接输出 `main`。
+
+**所以以后 `git init` 之后不用再改名，直接 `git push` 即可。**
+详见坑 5。
 
 ### 1. 把代理从「硬编码」改成「跟随环境变量」
 
@@ -358,7 +448,9 @@ git -c http.proxy= -c https.proxy= ls-remote <url>   # 能列出来 = 网络没�
 | `403 Resource not accessible by integration` | MCP 令牌无建仓权 | 改用 `gh repo create` |
 | `CRYPT_E_NO_REVOCATION_CHECK (0x80092012)` | schannel 吊销检查 | 先修代理；git 用 OpenSSL 不受影响 |
 | `port 22: Connection refused` | SSH 22 端口被封 | `Hostname ssh.github.com` + `Port 443` |
-| `src refspec main does not match any` | 本地是 `master` | `git push -u origin master:main` 或 `git branch -M main` |
+| `src refspec main does not match any` | 本地是 `master` | `git branch -M main` |
+| `upstream branch ... does not match the name` | 同上（已建上游后） | 同上，改完就永久解决 |
+| `! [rejected] (non-fast-forward)` | 本地 reset 过，远程没回滚 | `git push --force-with-lease` |
 | `netstat` 查不到代理端口 | 代理没开 | 开代理，或用直连方案 |
 
 ---
