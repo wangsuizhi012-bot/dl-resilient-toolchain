@@ -100,6 +100,7 @@
         }
       },
       "returns": "path, files[], route{flow,reason}",
+      "note": "dl.hf delegates to huggingface_hub, which shows its own tqdm progress line. Use --panel with dl.pypi / dl.url for the web panel. For an HF download that must be visible in a browser, use dl.route to confirm the source, then download the individual weight files with dl.url --panel.",
       "examples": [
         {
           "cli": "dl hf Qwen/Qwen2-0.5B -d E:/models/qwen --allow \"*.safetensors\"",
@@ -197,6 +198,24 @@
           "default": false,
           "cli": "-q/--quiet",
           "desc": "suppress the progress line"
+        },
+        "panel": {
+          "type": "bool",
+          "default": false,
+          "cli": "--panel",
+          "desc": "start a built-in web panel on 127.0.0.1:8790 showing live speed/ETA/mirror switches. Use it for large files so nothing is a black box"
+        },
+        "panel_port": {
+          "type": "int",
+          "default": 8790,
+          "cli": "--panel-port",
+          "desc": "port for the built-in panel"
+        },
+        "panel_url": {
+          "type": "str",
+          "default": "",
+          "cli": "--panel-url",
+          "desc": "POST progress events to an EXISTING panel endpoint instead of starting a new one, e.g. http://127.0.0.1:8125/event"
         }
       },
       "returns": "path, size, size_human, mirror, resumed_from",
@@ -204,6 +223,10 @@
         {
           "cli": "dl pypi six six-1.16.0.tar.gz -d D:/tmp",
           "api": "run(\"dl.pypi\", pkg=\"six\", file=\"six-1.16.0.tar.gz\", dest=\"D:/tmp\")"
+        },
+        {
+          "cli": "dl pypi six six-1.16.0.tar.gz -d D:/tmp --panel",
+          "api": "run(\"dl.pypi\", pkg=\"six\", file=\"six-1.16.0.tar.gz\", dest=\"D:/tmp\", panel=True)"
         }
       ],
       "errors": [
@@ -282,6 +305,24 @@
           "default": false,
           "cli": "-q/--quiet",
           "desc": "suppress the progress line"
+        },
+        "panel": {
+          "type": "bool",
+          "default": false,
+          "cli": "--panel",
+          "desc": "start a built-in web panel on 127.0.0.1:8790 showing live speed/ETA/source switches. Open it in a browser; never a black box"
+        },
+        "panel_port": {
+          "type": "int",
+          "default": 8790,
+          "cli": "--panel-port",
+          "desc": "port for the built-in panel"
+        },
+        "panel_url": {
+          "type": "str",
+          "default": "",
+          "cli": "--panel-url",
+          "desc": "POST progress events to an EXISTING panel endpoint, e.g. http://127.0.0.1:8125/event"
         }
       },
       "returns": "path, size, size_human, mirror, resumed_from",
@@ -289,6 +330,10 @@
         {
           "cli": "dl url https://example.com/f.bin -o D:/tmp/f.bin",
           "api": "run(\"dl.url\", url=\"https://example.com/f.bin\", output=\"D:/tmp/f.bin\")"
+        },
+        {
+          "cli": "dl url https://hf-mirror.com/... -o D:/tmp/f.bin --panel",
+          "api": "run(\"dl.url\", url=..., output=..., panel=True)"
         }
       ],
       "errors": [

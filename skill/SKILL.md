@@ -1,11 +1,11 @@
 ---
 name: dl-resilient-download
 display_name: "弹性下载"
-description: 下载文件、PyPI 包、Hugging Face 模型或任意 URL，带镜像自动切换、断点续传、实时进度与代理流量控制。适用于任何「下载卡住、下载很慢、下载中断、超时、连接失败」的情况，或用户要求「下载模型 / 下载数据集 / 下载权重 / 下个包 / 下个文件 / 抓取文件 / 换个源下载 / 用代理下载 / 限流量下载」时。触发词：下载、下文件、下模型、下包、下载包、pip 下载、抓取文件、下载数据集、下载权重、下载卡住、下载失败、下载慢、下载中断、超时、连接失败、镜像、换源、换个源下载、断点续传、代理下载、用代理下载、限流量下载、hf-mirror、huggingface 下载、大文件下载、model download、download failed、download stuck。
+description: 下载文件、PyPI 包、Hugging Face 模型或任意 URL，带镜像自动切换、断点续传、实时进度、可视化面板与代理流量控制。适用于任何「下载卡住、下载很慢、下载中断、超时、连接失败」的情况，或用户要求「下载模型 / 下载数据集 / 下载权重 / 下个包 / 下个文件 / 抓取文件 / 换个源下载 / 用代理下载 / 限流量下载 / 看着点 / 别黑盒」时。触发词：下载、下文件、下模型、下包、下载包、pip 下载、抓取文件、下载数据集、下载权重、下载卡住、下载失败、下载慢、下载中断、超时、连接失败、镜像、换源、换个源下载、断点续传、代理下载、用代理下载、限流量下载、看着点、看着下载、别黑盒、不要黑箱、显示进度、实时进度、可视化面板、看进度、hf-mirror、huggingface 下载、大文件下载、model download、download failed、download stuck。
 description_zh: "带镜像自动切换、断点续传、实时进度和代理流量控制的下载工具。用于下载卡住、缓慢、超时，或用户要抓取模型/数据集/包/大文件时。触发词：下载、下模型、下包、换源、断点续传、代理下载。"
 description_en: "Download with mirror failover, resume, live progress and proxy budget control."
 display_name_en: "Resilient Download"
-version: 1.1.1
+version: 1.2.0
 agent_created: true
 allowed-tools: Bash, Read
 metadata:
@@ -33,6 +33,38 @@ python E:/AI/_scripts/dl/dl.py caps
 **若提示文件不存在**：引擎不在 `E:/AI/_scripts/dl/`，
 从 <https://github.com/wangsuizhi012-bot/dl-resilient-toolchain> 克隆，
 或改用本 Skill 里出现的其他路径（不要假设路径唯一）。
+
+---
+
+## 铁律：大文件必须开面板（不许黑盒）
+
+用户 2026-09-21 立规：**长任务不许黑箱**。超过 ~30 秒的下载，
+**必须**加 `--panel` 起可视化面板，并把地址告诉用户。
+
+```bash
+# 大文件：起面板 + 把地址给用户看
+python E:/AI/_scripts/dl/dl.py url <url> -o <path> --panel
+# 输出里会出现：
+#   >>> PANEL: panel started at http://127.0.0.1:8790
+```
+
+面板实时显示：**进度条 / 已下载 / 总量 / 速度 / ETA / 当前镜像**，
+以及**换源原因和断点续传记录**（"resuming from 512.0MB"、
+"tls verify failed -> switch"）——这些正是黑盒执行时用户看不到的东西。
+
+| 参数 | 作用 |
+|---|---|
+| `--panel` | 起内置面板（默认 8790） |
+| `--panel-port 9000` | 换端口（端口被占时用） |
+| `--panel-url http://127.0.0.1:8125/event` | 把进度喂给**已有**面板（如 taskviz-panel） |
+
+**何时必须开**：权重/数据集（>100MB）、任何预计超 1 分钟的下载、
+以及用户说了「看着点」「别黑盒」的时候。
+
+**何时不用**：小文件（pip 包、config.json）——加了也只是噪音。
+
+> ⚠️ 面板是**线程内起的后台服务**，下载结束它就没了。
+> 需要下载完还能查看，就得用 `--panel-url` 喂给常驻面板。
 
 ---
 

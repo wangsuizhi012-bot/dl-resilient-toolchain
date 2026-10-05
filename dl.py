@@ -108,6 +108,12 @@ def _emit(env, as_json: bool) -> int:
             print("  hint: %s" % err["hint"])
     for w in env.get("warnings", []):
         print("  warn: %s" % w)
+    # When a panel was requested, put the URL front and centre: the whole
+    # point is that the user can watch the transfer instead of guessing.
+    for w in env.get("warnings", []):
+        if "panel started at" in w:
+            print("")
+            print("  >>> PANEL: %s   (leave this window open to watch)" % w)
     if not as_json:
         print("  (add --json for the machine-readable envelope)")
     return exit_code_for(env)
@@ -124,6 +130,15 @@ def main(argv=None) -> int:
     def common(p):
         p.add_argument("--json", action="store_true",
                        help="emit the raw response envelope")
+        # Visibility: project rule 2026-09-21 forbids black-box long tasks.
+        p.add_argument("--panel", action="store_true",
+                       help="start a built-in web panel (default :8790) so the "
+                            "download is visible in a browser")
+        p.add_argument("--panel-port", type=int, default=8790,
+                       help="port for the built-in panel")
+        p.add_argument("--panel-url", default="",
+                       help="report progress to an existing panel endpoint, "
+                            "e.g. http://127.0.0.1:8125/event")
         return p
 
     p = common(sub.add_parser("probe", help="check mirror health"))
@@ -176,7 +191,9 @@ def main(argv=None) -> int:
         env = run("dl.route", target=args.target, proxy=args.proxy)
     elif args.cmd == "pypi":
         env = run("dl.pypi", pkg=args.pkg, file=args.file, dest=args.dest,
-                  retries=args.retries, quiet=args.quiet)
+                  retries=args.retries, quiet=args.quiet,
+                  panel=args.panel, panel_port=args.panel_port,
+                  panel_url=args.panel_url)
     elif args.cmd == "hf":
         env = run("dl.hf", repo=args.repo, dest=args.dest,
                   allow=args.allow or [], proxy=args.proxy,
@@ -185,7 +202,9 @@ def main(argv=None) -> int:
                   token=args.token)
     elif args.cmd == "url":
         env = run("dl.url", url=args.url, output=args.output,
-                  mirror=args.mirror, retries=args.retries, quiet=args.quiet)
+                  mirror=args.mirror, retries=args.retries, quiet=args.quiet,
+                  panel=args.panel, panel_port=args.panel_port,
+                  panel_url=args.panel_url)
     elif args.cmd == "caps":
         env = run("dl.caps")
     elif args.cmd == "health":

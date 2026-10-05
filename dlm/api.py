@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from typing import Any, Dict, List, Optional
 
 from . import router as R
@@ -89,12 +90,25 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                         "desc": "attempts per mirror before switching"},
             "quiet": {"type": "bool", "default": False, "cli": "-q/--quiet",
                       "desc": "suppress the progress line"},
+            "panel": {"type": "bool", "default": False, "cli": "--panel",
+                      "desc": "start a built-in web panel on 127.0.0.1:8790 "
+                              "showing live speed/ETA/mirror switches. Use it "
+                              "for large files so nothing is a black box"},
+            "panel_port": {"type": "int", "default": 8790, "cli": "--panel-port",
+                           "desc": "port for the built-in panel"},
+            "panel_url": {"type": "str", "default": "", "cli": "--panel-url",
+                          "desc": "POST progress events to an EXISTING panel "
+                                  "endpoint instead of starting a new one, "
+                                  "e.g. http://127.0.0.1:8125/event"},
         },
         "returns": "path, size, size_human, mirror, resumed_from",
         "examples": [
             {"cli": 'dl pypi six six-1.16.0.tar.gz -d D:/tmp',
              "api": 'run("dl.pypi", pkg="six", '
                     'file="six-1.16.0.tar.gz", dest="D:/tmp")'},
+            {"cli": 'dl pypi six six-1.16.0.tar.gz -d D:/tmp --panel',
+             "api": 'run("dl.pypi", pkg="six", '
+                    'file="six-1.16.0.tar.gz", dest="D:/tmp", panel=True)'},
         ],
         "errors": [Code.NOT_FOUND, Code.NO_HEALTHY_SOURCE, Code.INTEGRITY,
                    Code.TIMEOUT],
@@ -121,6 +135,11 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                       "desc": "HF token for gated repos"},
         },
         "returns": "path, files[], route{flow,reason}",
+        "note": "dl.hf delegates to huggingface_hub, which shows its own "
+                "tqdm progress line. Use --panel with dl.pypi / dl.url for the "
+                "web panel. For an HF download that must be visible in a "
+                "browser, use dl.route to confirm the source, then download "
+                "the individual weight files with dl.url --panel.",
         "examples": [
             {"cli": 'dl hf Qwen/Qwen2-0.5B -d E:/models/qwen --allow "*.safetensors"',
              "api": 'run("dl.hf", repo="Qwen/Qwen2-0.5B", '
@@ -149,12 +168,23 @@ TOOLS: Dict[str, Dict[str, Any]] = {
                         "desc": "attempts per URL before giving up"},
             "quiet": {"type": "bool", "default": False, "cli": "-q/--quiet",
                       "desc": "suppress the progress line"},
+            "panel": {"type": "bool", "default": False, "cli": "--panel",
+                      "desc": "start a built-in web panel on 127.0.0.1:8790 "
+                              "showing live speed/ETA/source switches. Open it "
+                              "in a browser; never a black box"},
+            "panel_port": {"type": "int", "default": 8790, "cli": "--panel-port",
+                           "desc": "port for the built-in panel"},
+            "panel_url": {"type": "str", "default": "", "cli": "--panel-url",
+                          "desc": "POST progress events to an EXISTING panel "
+                                  "endpoint, e.g. http://127.0.0.1:8125/event"},
         },
         "returns": "path, size, size_human, mirror, resumed_from",
         "examples": [
             {"cli": 'dl url https://example.com/f.bin -o D:/tmp/f.bin',
              "api": 'run("dl.url", url="https://example.com/f.bin", '
                     'output="D:/tmp/f.bin")'},
+            {"cli": 'dl url https://hf-mirror.com/... -o D:/tmp/f.bin --panel',
+             "api": 'run("dl.url", url=..., output=..., panel=True)'},
         ],
         "errors": [Code.TIMEOUT, Code.INTEGRITY, Code.TLS_BLOCKED,
                    Code.NOT_FOUND],
@@ -304,23 +334,58 @@ def classify_target(target: str) -> tuple:
     return "dl.pypi", {"pkg": t, "file": "", "dest": "."}
 
 
+def _bus_for(p: Dict[str, Any], job: str):
+    """Build a progress event bus when the caller asked for visibility.
+
+    Two modes:
+      panel_url -> POST events to an existing panel (e.g. taskviz-panel)
+      panel     -> start our own built-in panel thread on `panel_port`
+    Returns (bus, warnings). A failure to reach the panel is never fatal.
+    """
+    from . import viz
+    warnings: List[str] = []
+    url = p.get("panel_url")
+    if not url and not p.get("panel"):
+        return None, warnings
+    b = viz.EventBus(job)
+    if url:
+        b.add_panel(url)
+        warnings.append("reporting progress to %s" % url)
+    else:
+        port = int(p.get("panel_port") or 8790)
+        try:
+            srv = viz.PanelServer(port=port)
+            th = threading.Thread(target=srv.serve_forever, daemon=True)
+            th.start()
+            b.add_callback(srv.handle)
+            warnings.append("panel started at http://127.0.0.1:%d "
+                            "(leave it open to watch)" % port)
+        except Exception as e:  # noqa: BLE001
+            warnings.append("panel failed to start (%s); continuing without "
+                            "visual output" % e)
+    return b, warnings
+
+
 def _t_pypi(p: Dict[str, Any]) -> Dict[str, Any]:
     from . import adapters
+    bus, warns = _bus_for(p, p.get("file", "download"))
     dl = Downloader(max_retries=int(p.get("retries") or 4),
-                    progress=not p.get("quiet"))
+                    progress=not p.get("quiet"), bus=bus)
     res = adapters.download_pypi_file(p["pkg"], p["file"], p["dest"], dl=dl)
     if not res.ok:
-        return envelope("dl.pypi", "1.0.0", "error",
+        return envelope("dl.pypi", "1.1.0", "error",
                         error=classify_failure(res.reason, res.attempts),
                         metrics={"attempts": res.attempts,
-                                 "elapsed_s": round(res.elapsed, 3)})
-    return envelope("dl.pypi", "1.0.0", "ok",
+                                 "elapsed_s": round(res.elapsed, 3)},
+                        warnings=warns)
+    return envelope("dl.pypi", "1.1.0", "ok",
                     result={"path": res.path, "size": res.size,
                             "size_human": human(res.size), "mirror": res.mirror,
                             "resumed_from": res.resumed_from},
                     metrics={"attempts": res.attempts,
                              "elapsed_s": round(res.elapsed, 3),
-                             "bytes": res.size})
+                             "bytes": res.size},
+                    warnings=warns)
 
 
 def _t_hf(p: Dict[str, Any]) -> Dict[str, Any]:
@@ -382,22 +447,25 @@ def _t_hf(p: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _t_url(p: Dict[str, Any]) -> Dict[str, Any]:
+    bus, warns = _bus_for(p, os.path.basename(p.get("output", "download")))
     dl = Downloader(max_retries=int(p.get("retries") or 4),
-                    progress=not p.get("quiet"))
+                    progress=not p.get("quiet"), bus=bus)
     cands = [("origin", p["url"])]
     if p.get("mirror"):
         cands.append(("mirror", p["mirror"]))
     res = dl.fetch(cands, p["output"], label=os.path.basename(p["output"]))
     if not res.ok:
-        return envelope("dl.url", "1.0.0", "error",
+        return envelope("dl.url", "1.1.0", "error",
                         error=classify_failure(res.reason, res.attempts),
                         metrics={"attempts": res.attempts,
-                                 "elapsed_s": round(res.elapsed, 3)})
-    return envelope("dl.url", "1.0.0", "ok",
+                                 "elapsed_s": round(res.elapsed, 3)},
+                        warnings=warns)
+    return envelope("dl.url", "1.1.0", "ok",
                     result={"path": res.path, "size": res.size,
                             "size_human": human(res.size),
                             "mirror": res.mirror,
                             "resumed_from": res.resumed_from},
+                    warnings=warns,
                     metrics={"attempts": res.attempts,
                              "elapsed_s": round(res.elapsed, 3),
                              "bytes": res.size})

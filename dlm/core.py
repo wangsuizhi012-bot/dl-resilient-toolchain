@@ -73,7 +73,8 @@ class Progress:
     --quiet is set; otherwise it degrades to periodic lines so a log file
     still shows movement."""
 
-    def __init__(self, label: str, total: int, *, enabled: bool = True):
+    def __init__(self, label: str, total: int, *, enabled: bool = True,
+                 bus=None):
         self.label = label
         self.total = total
         self.enabled = enabled and sys.stderr.isatty()
@@ -82,10 +83,16 @@ class Progress:
         self.t0 = time.time()
         self._last = 0.0
         self._last_done = 0
+        # Optional event bus: lets a browser panel / caller observe the same
+        # progress the terminal shows. Never required, never fatal.
+        self.bus = bus
 
     def update(self, done: int, force: bool = False) -> None:
         self.done = done
         now = time.time()
+        if self.bus is not None:
+            dt = max(now - self.t0, 1e-6)
+            self.bus.progress(done, self.total, done / dt, force=force)
         if self.enabled:
             if not force and now - self._last < 0.25:
                 return
@@ -122,12 +129,18 @@ class Progress:
 class Downloader:
     def __init__(self, *, timeout: float = 30.0, max_retries: int = 4,
                  max_mirror_switches: int = 3, progress: bool = True,
-                 verify_sha256: bool = True):
+                 verify_sha256: bool = True, bus=None):
         self.timeout = timeout
         self.max_retries = max_retries
         self.max_mirror_switches = max_mirror_switches
         self.progress = progress
         self.verify_sha256 = verify_sha256
+        # Optional structured event sink (browser panel / orchestrator).
+        self.bus = bus
+
+    def _ev(self, etype: str, **kw) -> None:
+        if self.bus is not None:
+            self.bus.emit(etype, **kw)
 
     # ---- low level -------------------------------------------------------
     def _open(self, url: str, offset: int = 0, etag: str = ""):
@@ -185,8 +198,13 @@ class Downloader:
                 break
             if idx > 0:
                 switches += 1
+                self._ev("source", source=mirror_name,
+                         message="switching to %s" % mirror_name)
             for attempt in range(self.max_retries):
                 attempts += 1
+                self._ev("attempt", n=attempts, source=mirror_name,
+                         message="%s (attempt %d/%d)"
+                                 % (mirror_name, attempt + 1, self.max_retries))
                 meta = self._load_meta(target)
                 part = target + ".part"
                 have = os.path.getsize(part) if os.path.exists(part) else 0
@@ -195,6 +213,10 @@ class Downloader:
                     self._clear_partial(target)
                     have = 0
                 resumed_from = have
+                if have:
+                    self._ev("resume", source=mirror_name, from_bytes=have,
+                             from_h=human(have),
+                             message="resuming from %s" % human(have))
 
                 try:
                     resp = self._open(url, have, meta.get("etag", ""))
@@ -222,8 +244,11 @@ class Downloader:
 
                     self._save_meta(target, {"url": url, "etag": etag,
                                              "mirror": mirror_name})
-                    prog = Progress(label, total, enabled=self.progress)
-                    prog.update(have)
+                    self._ev("start", source=mirror_name, total=total,
+                             done_h=human(have), total_h=human(total))
+                    prog = Progress(label, total, enabled=self.progress,
+                                    bus=self.bus)
+                    prog.update(have, force=True)
                     mode = "ab" if have else "wb"
                     digest = hashlib.sha256() if (self.verify_sha256 and total
                                                   and not have) else None
@@ -251,16 +276,25 @@ class Downloader:
                                    {"sha256": sha} if sha else {})
                     if sha and meta.get("sha256") and meta["sha256"] != sha:
                         self._clear_partial(target)
+                        self._ev("fail", source=mirror_name,
+                                 message="sha256 mismatch (corrupt transfer)")
                         return Result(False, target, have, time.time() - t0,
                                       attempts, mirror_name,
                                       "sha256 mismatch (corrupt transfer)", resumed_from)
+                    self._ev("done", source=mirror_name, done=have,
+                             done_h=human(have), total_h=human(total),
+                             elapsed=round(time.time() - t0, 1),
+                             message="done via %s" % mirror_name)
                     return Result(True, target, have, time.time() - t0,
                                   attempts, mirror_name, "", resumed_from)
 
                 except urllib.error.HTTPError as e:
                     f = E.classify_status(e.code)
                     last = "%s (%s)" % (f.reason, mirror_name)
+                    self._ev("note", source=mirror_name,
+                             message="%s -> %s" % (f.reason, f.verdict))
                     if f.fatal:
+                        self._ev("fail", source=mirror_name, message=last)
                         return Result(False, target, 0, time.time() - t0,
                                       attempts, mirror_name, last, resumed_from)
                     if e.code in (416,):
@@ -271,13 +305,17 @@ class Downloader:
                 except Exception as e:  # noqa: BLE001
                     f = E.classify_exception(e)
                     last = "%s (%s)" % (f.reason, mirror_name)
+                    self._ev("note", source=mirror_name,
+                             message="%s -> %s" % (f.reason, f.verdict))
                     if f.fatal:
+                        self._ev("fail", source=mirror_name, message=last)
                         return Result(False, target, 0, time.time() - t0,
                                       attempts, mirror_name, last, resumed_from)
                     if f.verdict in (E.Verdict.RETRY_NEXT, E.Verdict.RETRY_PROXY):
                         break
                     self._sleep(attempt)
 
+        self._ev("fail", message=last or "all candidates failed")
         return Result(False, target, 0, time.time() - t0, attempts, "", last,
                       resumed_from)
 
