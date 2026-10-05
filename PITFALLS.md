@@ -363,6 +363,130 @@ git -c http.proxy= -c https.proxy= ls-remote <url>   # 只读，不改远程
 或者在**临时仓库**测（`/tmp/xxx`），别在真实仓库上试。
 
 
+## 坑 7：`gh` 能连但 `git` 连不上（SSL 后端不同）
+
+### 现象（同一次操作，两条路结果相反）
+
+```
+$ gh api repos/.../commits/main --jq '.sha[0:7]'
+dda3c87                                    ← gh 成功
+
+$ git ls-remote origin
+fatal: unable to access '...': Failed to connect to github.com:443
+       after 21099 ms: Could not connect to server   ← git 失败
+```
+
+### 根本原因
+
+**curl / gh 用 Windows Schannel，git 用自带 OpenSSL**，两者证书链来源不同：
+
+```
+$ curl --version | grep -i ssl
+  Schannel zlib/1.3.2                        ← 系统证书库
+$ git --version --build-options | grep -i ssl
+  OpenSSL: OpenSSL 3.5.7 9 Jun 2026         ← 自带 CA 包
+```
+
+本机中间链路会让 **OpenSSL 的证书校验失败**，但 Schannel 走系统证书库
+（已装好对应根证书）**可以通过**。
+
+### 排查思路（关键：先证明"不是网络问题"）
+
+```bash
+# 1) 用 curl 证明网络本身是通的
+curl -s --noproxy '*' -o /dev/null -w "%{http_code}\n" \
+  https://api.github.com/repos/<owner>/<repo>          # -> 200
+
+# 2) 对比两者的 TLS 后端
+curl --version | grep -i ssl        # Schannel?
+git --version --build-options | grep -i ssl   # OpenSSL?
+
+# 3) 让 git 改用 schannel
+git -c http.sslBackend=schannel ls-remote <url>
+```
+
+**第 1 步是关键**。curl 200 而 git 失败，就排除了网络层，
+问题必然在 TLS 实现差异上。
+
+### 解决方法
+
+```bash
+# 单次：加 -c 参数
+git -c http.sslBackend=schannel -c http.proxy= -c https.proxy= push
+
+# 永久（本机已执行）
+git config --global http.sslBackend schannel
+```
+
+改完实测：裸 `git ls-remote` 立即正常。
+
+> 顺带：本机还把 `http.proxy=http://127.0.0.1:65532` 硬编码在
+> `.gitconfig` 里，而 65532 常常没监听 → 已 `--unset`，
+> 现在 git 会**跟随环境变量**（当前是 WorkBuddy 注入的 8103）。
+
+---
+
+## 坑 8：代理只放行读操作，`push` 返回 502
+
+### 现象
+
+```
+$ git ls-remote origin        # 读操作
+dda3c87...	refs/heads/main                 ← 成功
+
+$ git push origin main        # 写操作
+fatal: ... CONNECT tunnel failed, response 502   ← 失败
+```
+
+### 根本因��
+
+当前环境注入的代理（`127.0.0.1:8103`，端口每次会话会变）
+**允许 GET（读）但拒绝 POST/PUT（写）**：
+
+```bash
+curl -o /dev/null -w "%{http_code}\n" \
+  ".../info/refs?service=git-upload-pack"      # -> 200（读 OK）
+curl -X POST -o /dev/null -w "%{http_code}\n" \
+  ".../git-rece-pack"                          # -> 422（POST 被接受但协议不符）
+# 经代理发 push -> CONNECT tunnel failed, 502
+```
+
+### 排查思路
+
+「ls-remote 通、push 不通」= **不是认证问题、不是网络问题，
+是代理的方法/路径过滤**。
+
+### 解决方法
+
+**写操作走直连**：
+
+```bash
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY \
+  git push origin main
+```
+
+实测直连 push 返回 `Everything up-to-date`（说明远程早已同步成功）。
+
+### 实用建议
+
+排查"git 连不上"时，**同时准备三条路**：
+
+```bash
+# 1) 绕过死代理 + 换 SSL 后端（最稳）
+git -c http.sslBackend=schannel -c http.proxy= -c https.proxy= push
+
+# 2) 完全直连（绕过所有代理）
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY git push
+
+# 3) 换用 gh（它有自己的 TLS 栈和认证）
+gh auth login && gh repo create ... && gh api ...
+```
+
+**交叉验证很重要**：`gh` 能读不代表 `git` 能读，反之亦然。
+判断"到底推上去没有"，要用**至少两条独立路径**确认。
+
+---
+
 ## 📌 如何避免复发
 
 ### 0. 分支名：已一次性根治，**以后不用再管**
@@ -457,6 +581,10 @@ git -c http.proxy= -c https.proxy= ls-remote <url>   # 能列出来 = 网络没�
 
 ## 最终生效的推送方式（已实测跑通，可直接复制）
 
+> 本机已固化：`git config --global http.sslBackend schannel`，
+> 且已 `--unset http.proxy/https.proxy`（不再有死代理）。
+> 所以现在**裸 `git push` 就能用**。下面保留带 `-c` 的版本用于应急。
+
 ```bash
 # 1) 建仓（用 gh：本地 OAuth 令牌有建仓权，MCP 连接器没有）
 gh repo create wangsuizhi012-bot/dl-resilient-toolchain \
@@ -471,39 +599,41 @@ git -c user.name="wangsuizhi012-bot" \
     -c commit.gpgsign=false \
     commit -m "feat: resilient download toolchain v1.1.0"
 
-# 3) 推送（-c http.proxy= 绕过硬编码死代理；master:main 处理分支名差异）
-git remote add origin https://github.com/wangsuizhi012-bot/dl-resilient-toolchain.git
-git -c http.proxy= -c https.proxy= push -u origin master:main
+# 3) 推送（三条路任选，按网络状况挑）
+git push -u origin main                          # 首选：走固化好的 schannel
+git -c http.sslBackend=schannel -c http.proxy= -c https.proxy= push -u origin main
+env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY git push -u origin main
 ```
 
-**两条 `-c http.proxy= -c https.proxy=` 是本机 push 成功的关键**，
-它让本次 push 不走 `~/.gitconfig` 里那个指向 65532 的死代理。
-
-### 一次性根治（可选，会改动你的全局配置）
+**两条关键配置（本机已生效）**：
 
 ```bash
-git config --global --unset http.proxy
-git config --global --unset https.proxy
+git config --global http.sslBackend schannel   # 解决坑 7（OpenSSL 证书链）
+git config --global --unset http.proxy          # 解决坑 1（死代理 65532）
 ```
 
-移除后 git 自动回退到读环境变量，此后代理开关无需再动 git 配置。
-**前提**：你不再需要「git 固定走某个代理」。
+### 一次性根治（都已执行完毕）
+
+```bash
+git config --global init.defaultBranch main         # 解决坑 5
+git config --global http.sslBackend schannel        # 解决坑 7
+git config --global --unset http.proxy              # 解决坑 1
+git config --global --unset https.proxy             # 解决坑 1
+```
 
 ---
 
-## ✅ 实测结果（2026-10-03）
+## ✅ 实测结果（2026-10-05 更新）
 
 ```
-$ git -c http.proxy= -c https.proxy= push -u origin master:main
-To https://github.com/wangsuizhi012-bot/dl-resilient-toolchain.git
- * [new branch]      master -> main
-branch 'master' set up to track 'origin/main'.
+$ git push origin main
+Everything up-to-date
 
-$ git ls-remote origin
-5a5e8dc9ba84eae2abc55e82919aecf43cb8dc08	HEAD
-5a5e8dc9ba84eae2abc55e82919aecf43cb8dc08	refs/heads/main
+$ git ls-remote origin refs/heads/main
+dda3c87e8cd3ece048bda75982756123545c1de9	refs/heads/main
 ```
 
 仓库：<https://github.com/wangsuizhi012-bot/dl-resilient-toolchain>
-19 个文件 / 3874 行，全部推送成功。
+5 次提交，23 文件，全部已同步。
+
 
