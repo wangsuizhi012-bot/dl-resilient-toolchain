@@ -333,3 +333,10 @@ import sys; sys.path.insert(0, r"E:\AI\_scripts\dl")
 from dlm import Downloader
 from dlm.batch import download_many
 ```
+
+## 已收录 Skill
+
+| Skill | 目录 | 说明 |
+|---|---|---|
+| 弹性下载 `dl-resilient-download` | `skill/SKILL.md` | 多镜像故障切换、断点续传、实时面板 |
+| 夸克网盘极速下载 `quark-netdisk-fast-download` | `skill/quark-netdisk-fast-download/SKILL.md` | 非会员绕限速：客户端快传「发给自己」通道 + CDP/UIA 自动化，实测 4.4-4.6MB/s |
